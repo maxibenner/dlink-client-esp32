@@ -6,11 +6,7 @@
 #include <HTTPClient.h>
 #include "ButtonModule.h"
 #include "WifiModule.h"
-
-static const char *kWifiSsid = WIFI_SSID;
-static const char *kWifiPassword = WIFI_PASSWORD;
-static const char *kApiHost = API_HOST;
-static const char *kApiPath = API_PATH;
+#include "secrets.h"
 
 // Button
 #define BUTTON_PIN 15
@@ -58,7 +54,7 @@ void setup()
   net.beginStation();
 
   Serial.print("Connecting to Wi-Fi");
-  if (!net.connect(kWifiSsid, kWifiPassword, 15000))
+  if (!net.connect(WIFI_SSID, WIFI_PASSWORD, 15000))
   {
     Serial.println("\nWi-Fi connect failed (timeout). Rebooting in 5s...");
     delay(5000);
@@ -78,7 +74,7 @@ void loop()
     Serial.println("Making request");
 
     // HTTP Request -----------------
-    String url = String(kApiHost) + kApiPath;
+    String url = String(API_HOST) + API_PATH;
     Serial.print("GET ");
     Serial.println(url);
 
