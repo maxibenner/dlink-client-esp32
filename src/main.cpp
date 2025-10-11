@@ -80,6 +80,8 @@ void setup()
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
+  display.println("Hold to record");
+  display.display();
 
   recorder.begin();
   recorder.setUploadPath(UPLOAD_PATH);
@@ -94,7 +96,7 @@ void loop()
   {
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println("Rec...");
+    display.println("Recording...");
     display.display();
     recorder.start();
   }
@@ -102,12 +104,16 @@ void loop()
   if (button.wasReleased())
   {
     // Stop recording
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Processing...");
+    display.display();
     recorder.stop();
 
     // Start wifi
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println("Connecting to Wi-Fi");
+    display.println("Connecting...");
     display.display();
 
     net.beginStation();
@@ -129,9 +135,9 @@ void loop()
 
     display.clearDisplay();
     display.setCursor(0, 0);
-    display.println("Success");
+    display.println("Success, shutting down...");
     display.display();
-    delay(3000);
+    delay(2000);
 
     // Clear display and restart ESP32
     display.clearDisplay();
