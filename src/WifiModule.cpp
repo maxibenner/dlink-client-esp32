@@ -1,4 +1,5 @@
 #include "WifiModule.h"
+#include "secrets.h"
 
 void WifiModule::beginStation()
 {

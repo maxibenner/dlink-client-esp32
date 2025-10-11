@@ -4,35 +4,68 @@
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <FS.h>
+#include <SPIFFS.h>
+
 #include "ButtonModule.h"
 #include "WifiModule.h"
+#include "RecordingModule.h"
 #include "secrets.h"
 
-// Button
+#include "driver/i2s.h"
+
+// -------------------- Pins & UI --------------------
 #define BUTTON_PIN 15
 
+// I2S
+#define I2S_NUM I2S_NUM_0
+#define I2S_WS 25             // Word select (LRC)
+#define I2S_SCK 33            // Serial clock (BCLK)
+#define I2S_SD 32             // Serial data (DIN)
+#define I2S_SAMPLE_RATE 16000 // 16kHz sample rate
+#define I2S_BUFFER_SIZE 1024
+
+// OLED
 #define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 32 // change to 64 for 128x64
+#define SCREEN_HEIGHT 32
 #define OLED_RESET -1
-#define SCREEN_ADDRESS 0x3C // set to your scanner result
+#define SCREEN_ADDRESS 0x3C
 #define I2C_SDA 21
 #define I2C_SCL 22
+
+// Server
+const char *UPLOAD_PATH = API_PATH;
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Button button(BUTTON_PIN);
 WifiModule net;
+
+// RecordingModule: global instance
+RecordingModule recorder(
+    I2S_NUM,
+    I2S_SCK,
+    I2S_WS,
+    I2S_SD,
+    I2S_SAMPLE_RATE,
+    512,
+    30,
+    "/rec.wav");
 
 void setup()
 {
   // General
   Serial.begin(115200);
 
-  // Button -----------------
+  // Filesystem for temporary WAV storage
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("SPIFFS mount failed");
+  }
+
+  // Button
   button.begin();
 
-  // Microphone ---------------
-
-  // Screen -----------------
+  // Screen
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
 
@@ -42,58 +75,69 @@ void setup()
     while (true)
       delay(1000);
   }
-
   display.clearDisplay();
   display.display();
-
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
 
-  // Wifi -----------------
-  net.beginStation();
-
-  Serial.print("Connecting to Wi-Fi");
-  if (!net.connect(WIFI_SSID, WIFI_PASSWORD, 15000))
-  {
-    Serial.println("\nWi-Fi connect failed (timeout). Rebooting in 5s...");
-    delay(5000);
-    ESP.restart();
-  }
-
-  Serial.print("\nWi-Fi connected, IP: ");
-  Serial.println(net.localIP());
+  recorder.begin();
+  recorder.setUploadPath(UPLOAD_PATH);
 }
 
 void loop()
 {
+
   button.update();
 
   if (button.wasPressed())
   {
-    Serial.println("Making request");
-
-    // HTTP Request -----------------
-    String url = String(API_HOST) + API_PATH;
-    Serial.print("GET ");
-    Serial.println(url);
-
-    String payload;
-    int code = net.httpGet(url, payload);
-    if (code == HTTP_CODE_OK)
-    {
-      Serial.println(payload);
-      display.println(payload);
-      display.display();
-    }
-    else
-    {
-      Serial.printf("HTTP GET failed: %d\n", code);
-    }
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Rec...");
+    display.display();
+    recorder.start();
   }
 
   if (button.wasReleased())
   {
-    // Serial.println("Button released");
+    // Stop recording
+    recorder.stop();
+
+    // Start wifi
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Connecting to Wi-Fi");
+    display.display();
+
+    net.beginStation();
+    if (!net.connect(WIFI_SSID, WIFI_PASSWORD, 15000))
+    {
+      display.clearDisplay();
+      display.setCursor(0, 0);
+      display.println("Failed, restart in 5s");
+      delay(5000);
+      ESP.restart();
+    }
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Uploading...");
+    display.display();
+
+    // Upload
+    recorder.upload();
+
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("Success");
+    display.display();
+    delay(3000);
+
+    // Clear display and restart ESP32
+    display.clearDisplay();
+    display.display();
+    ESP.restart();
   }
+
+  delay(1);
 }
