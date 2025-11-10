@@ -23,17 +23,18 @@ struct WavHeader
     uint32_t subchunk2Size = 0;
 };
 
-class RecordingModule
+class ApiClientModule
 {
 public:
-    RecordingModule(int i2s_num, int sck_pin, int ws_pin, int sd_pin,
+    ApiClientModule(int i2s_num, int sck_pin, int ws_pin, int sd_pin,
                     uint32_t sampleRate, size_t chunkSamples,
                     uint32_t maxSeconds, const char *outPath);
 
     void begin();
     void start();
     void stop();
-    void setUploadPath(const char *path);
+    void setInboxPath(const char *path);
+    bool checkInbox();
     bool upload();
 
 private:
@@ -55,7 +56,7 @@ private:
     const char *m_outPath;
 
     // Runtime
-    const char *m_uploadPath = nullptr;
+    const char *m_inboxPath = nullptr;
     uint32_t m_samplePeriod = 0;
 
     volatile bool m_isRecording = false;

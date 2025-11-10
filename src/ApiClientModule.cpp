@@ -1,7 +1,8 @@
-#include "RecordingModule.h"
+#include "ApiClientModule.h"
 #include "secrets.h"
+#include <ArduinoJson.h>
 
-RecordingModule::RecordingModule(int i2s_num,
+ApiClientModule::ApiClientModule(int i2s_num,
                                  int sck_pin,
                                  int ws_pin,
                                  int sd_pin,
@@ -22,10 +23,10 @@ RecordingModule::RecordingModule(int i2s_num,
     m_buf = new int16_t[m_chunkSamples];
 }
 
-void RecordingModule::begin()
+void ApiClientModule::begin()
 {
     i2s_config_t cfg = {
-        .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+        .mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate = m_sampleRate,
         .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
         .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // flipped because of bug in the library
@@ -55,7 +56,7 @@ void RecordingModule::begin()
     // Core notes: Arduino loop runs on core 1. Wi-Fi often on core 0.
     // Run audio on core 0 with high priority to avoid starvation.
     xTaskCreatePinnedToCore(
-        &RecordingModule::readerTaskThunk,
+        &ApiClientModule::readerTaskThunk,
         "i2s_reader",
         4096, // stack
         this, // arg
@@ -64,12 +65,12 @@ void RecordingModule::begin()
         0); // core 0
 }
 
-void RecordingModule::setUploadPath(const char *path)
+void ApiClientModule::setInboxPath(const char *path)
 {
-    m_uploadPath = path;
+    m_inboxPath = path;
 }
 
-void RecordingModule::writeWavHeader(File &f, uint32_t numSamples)
+void ApiClientModule::writeWavHeader(File &f, uint32_t numSamples)
 {
     WavHeader h;
     h.sampleRate = m_sampleRate;
@@ -83,7 +84,7 @@ void RecordingModule::writeWavHeader(File &f, uint32_t numSamples)
     f.write(reinterpret_cast<uint8_t *>(&h), sizeof(WavHeader));
 }
 
-void RecordingModule::flushChunk()
+void ApiClientModule::flushChunk()
 {
     if (m_bufIdx == 0 || !m_file)
         return;
@@ -91,7 +92,7 @@ void RecordingModule::flushChunk()
     m_bufIdx = 0;
 }
 
-void RecordingModule::start()
+void ApiClientModule::start()
 {
     if (m_isRecording)
         return;
@@ -126,7 +127,7 @@ void RecordingModule::start()
     Serial.println("Recording started");
 }
 
-void RecordingModule::stop()
+void ApiClientModule::stop()
 {
     if (!m_isRecording)
         return;
@@ -162,12 +163,12 @@ void RecordingModule::stop()
     m_waiterTask = nullptr;
 }
 
-void RecordingModule::readerTaskThunk(void *arg)
+void ApiClientModule::readerTaskThunk(void *arg)
 {
-    static_cast<RecordingModule *>(arg)->readerTask();
+    static_cast<ApiClientModule *>(arg)->readerTask();
 }
 
-void RecordingModule::readerTask()
+void ApiClientModule::readerTask()
 {
     int32_t *i2sBuf = (int32_t *)heap_caps_malloc(sizeof(int32_t) * 1024, MALLOC_CAP_8BIT);
     if (!i2sBuf)
@@ -233,7 +234,7 @@ static inline int16_t to_int16_from_i2s32(int32_t s32)
     return (int16_t)x;
 }
 
-void RecordingModule::processChunk(int32_t *i2sBuf, size_t samples)
+void ApiClientModule::processChunk(int32_t *i2sBuf, size_t samples)
 {
     for (size_t i = 0; i < samples; ++i)
     {
@@ -250,7 +251,7 @@ void RecordingModule::processChunk(int32_t *i2sBuf, size_t samples)
     }
 }
 
-bool RecordingModule::upload()
+bool ApiClientModule::upload()
 {
     if (m_isRecording)
     {
@@ -258,13 +259,13 @@ bool RecordingModule::upload()
         stop();
     }
 
-    if (!m_uploadPath)
+    if (!m_inboxPath)
     {
-        Serial.println("Upload path not set! Call setUploadPath().");
+        Serial.println("Upload path not set! Call setInboxPath().");
         return false;
     }
 
-    String url = String(API_HOST) + String(m_uploadPath);
+    String url = String(API_HOST) + String(m_inboxPath);
     Serial.print("POST ");
     Serial.println(url);
 
@@ -298,4 +299,46 @@ bool RecordingModule::upload()
     f.close();
     SPIFFS.remove(m_outPath);
     return true;
+}
+
+bool ApiClientModule::checkInbox()
+{
+    String url = String(API_HOST) + String(m_inboxPath);
+    Serial.print("GET ");
+    Serial.println(url);
+
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Content-Type", "audio/wav");
+
+    int httpCode = http.sendRequest("GET");
+    if (httpCode > 0)
+    {
+        Serial.printf("Upload response: %d\n", httpCode);
+        String resp = http.getString();
+        // Serial.println(resp);
+
+        JsonDocument doc;
+        deserializeJson(doc, resp);
+        const char *code = doc["code"];
+
+        Serial.println(code);
+
+        if (code == "EMPTY")
+        {
+            http.end();
+            return false;
+        }
+        else
+        {
+            http.end();
+            return true;
+        }
+    }
+    else
+    {
+        Serial.printf("HTTP POST failed: %s\n", http.errorToString(httpCode).c_str());
+        http.end();
+        return false;
+    }
 }
