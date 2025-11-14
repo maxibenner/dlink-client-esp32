@@ -14,12 +14,9 @@ void SpeakerModule::begin()
         .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT, // we will send 16-bit stereo frames
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, // interleaved stereo
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = 0,
-        .dma_buf_count = 6,
-        .dma_buf_len = 256,
-        .use_apll = false,
-        .tx_desc_auto_clear = true,
-        .fixed_mclk = 0};
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+        .dma_buf_count = 4,
+        .dma_buf_len = 64};
 
     i2s_driver_install((i2s_port_t)m_i2s_num, &i2s_config, 0, NULL);
 
