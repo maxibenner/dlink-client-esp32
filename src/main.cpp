@@ -50,7 +50,7 @@ static const char *kOutgoingPath = "/record.wav";
 static const char *kIncomingPath = "/inbox.wav";
 static const char *kSelfInboxPath = "/v1/" KEY_CLIENT "/inbox";
 static const char *kPartnerInboxPath = "/v1/" KEY_RECIPIENT "/inbox";
-static const uint32_t kInactivityMs = 300000; // 2 minutes before countdown starts
+static const uint32_t kInactivityMs = 120000; // 2 minutes before countdown starts
 static const int kCountdownSeconds = 10;
 
 static bool displayReady = false;
