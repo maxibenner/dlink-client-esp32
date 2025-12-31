@@ -479,6 +479,7 @@ static void primeStateAfterWake()
       return;
     }
 
+    speaker.playPing();
     transitionTo(ClientState::ReadyToPlay);
     return;
   }
@@ -574,7 +575,10 @@ static void handleButtonPress()
       apiClient.setInboxPath(kSelfInboxPath);
       return apiClient.downloadMessage(kIncomingPath); });
     if (downloaded)
+    {
+      speaker.playPing();
       transitionTo(ClientState::ReadyToPlay);
+    }
     else
       transitionTo(ClientState::ReadyToCheckPartner);
     break;

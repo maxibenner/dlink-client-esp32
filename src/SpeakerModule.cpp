@@ -1,4 +1,5 @@
 #include "SpeakerModule.h"
+#include <math.h>
 
 // Match recorder defaults
 #define PLAY_SAMPLE_RATE 8000
@@ -140,4 +141,50 @@ bool SpeakerModule::playFile(const char *path)
     i2s_stop((i2s_port_t)m_i2s_num);
     f.close();
     return true;
+}
+
+void SpeakerModule::playPing(uint16_t frequencyHz, uint16_t durationMs)
+{
+    if (frequencyHz == 0 || durationMs == 0)
+        return;
+
+    const uint32_t sampleRate = PLAY_SAMPLE_RATE;
+    const size_t totalSamples = (sampleRate * durationMs) / 1000;
+    if (totalSamples == 0)
+        return;
+
+    // Use a small chunk to avoid large stack usage.
+    constexpr size_t CHUNK = 128;
+    int16_t stereo[CHUNK * 2];
+
+    i2s_set_sample_rates((i2s_port_t)m_i2s_num, sampleRate);
+    i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
+    i2s_start((i2s_port_t)m_i2s_num);
+
+    size_t emitted = 0;
+    const float amplitude = 20000.0f;
+    const float phaseStep = (2.0f * PI * static_cast<float>(frequencyHz)) / static_cast<float>(sampleRate);
+    float phase = 0.0f;
+
+    while (emitted < totalSamples)
+    {
+        const size_t chunkSamples = min(CHUNK, totalSamples - emitted);
+        size_t idx = 0;
+        for (size_t i = 0; i < chunkSamples; ++i)
+        {
+            const int16_t sample = static_cast<int16_t>(sinf(phase) * amplitude);
+            phase += phaseStep;
+            if (phase >= 2.0f * PI)
+                phase -= 2.0f * PI;
+            stereo[idx++] = sample;
+            stereo[idx++] = sample;
+        }
+
+        size_t bytes = chunkSamples * 2 * sizeof(int16_t);
+        size_t written = 0;
+        i2s_write((i2s_port_t)m_i2s_num, stereo, bytes, &written, portMAX_DELAY);
+        emitted += chunkSamples;
+    }
+
+    i2s_stop((i2s_port_t)m_i2s_num);
 }

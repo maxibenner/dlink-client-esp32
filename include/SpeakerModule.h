@@ -9,6 +9,7 @@ public:
   SpeakerModule(int i2s_num, int bck_pin, int ws_pin, int data_pin);
   void begin();
   bool playFile(const char* path); // blocking playback; returns when finished
+  void playPing(uint16_t frequencyHz = 1400, uint16_t durationMs = 180);
 
 private:
   const int m_i2s_num;
