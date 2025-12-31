@@ -1,7 +1,7 @@
 #include "SpeakerModule.h"
 
 // Match recorder defaults
-#define PLAY_SAMPLE_RATE 16000
+#define PLAY_SAMPLE_RATE 8000
 
 SpeakerModule::SpeakerModule(int i2s_num, int bck_pin, int ws_pin, int data_pin)
     : m_i2s_num(i2s_num), m_bck_pin(bck_pin), m_ws_pin(ws_pin), m_data_pin(data_pin) {}

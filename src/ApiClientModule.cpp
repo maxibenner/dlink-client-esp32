@@ -1,6 +1,5 @@
 #include "ApiClientModule.h"
 #include "secrets.h"
-#include <ArduinoJson.h>
 
 ApiClientModule::ApiClientModule(int i2s_num,
                                  int sck_pin,
@@ -43,12 +42,27 @@ void ApiClientModule::begin()
         .data_out_num = I2S_PIN_NO_CHANGE,
         .data_in_num = m_sd_pin};
 
-    i2s_driver_install((i2s_port_t)m_i2s_num, &cfg, 0, nullptr);
+    i2s_driver_install((i2s_port_t)m_i2s_num, &cfg, 8, &m_i2sQueue);
     i2s_set_pin((i2s_port_t)m_i2s_num, &pins);
 
     // Ensure exact mono/32-bit/16kHz clock setup
     i2s_set_clk((i2s_port_t)m_i2s_num, m_sampleRate,
                 I2S_BITS_PER_SAMPLE_32BIT, I2S_CHANNEL_MONO);
+
+    m_flushQueue = xQueueCreate(kFlushQueueDepth, sizeof(FlushJob));
+    if (!m_flushQueue)
+    {
+        Serial.println("[REC] Failed to allocate flush queue; falling back to inline writes");
+    }
+    else
+    {
+        if (xTaskCreatePinnedToCore(&ApiClientModule::writerTaskThunk, "wav_writer", 4096, this, 5, &m_writerTask, 1) != pdPASS)
+        {
+            Serial.println("[REC] Failed to start writer task; flushing inline");
+            vQueueDelete(m_flushQueue);
+            m_flushQueue = nullptr;
+        }
+    }
 
     Serial.println("I2S initialized for digital mic (mono/right)");
 
@@ -70,6 +84,32 @@ void ApiClientModule::setInboxPath(const char *path)
     m_inboxPath = path;
 }
 
+bool ApiClientModule::ensureInboxPath(const char *operation) const
+{
+    if (m_inboxPath && m_inboxPath[0] != '\0')
+    {
+        return true;
+    }
+
+    Serial.print("Cannot ");
+    if (operation)
+        Serial.print(operation);
+    else
+        Serial.print("perform operation");
+    Serial.println(": inbox path not set. Call setInboxPath().");
+    return false;
+}
+
+String ApiClientModule::composeUrl(const char *suffix) const
+{
+    String url = String(API_HOST);
+    if (m_inboxPath)
+        url += String(m_inboxPath);
+    if (suffix)
+        url += String(suffix);
+    return url;
+}
+
 void ApiClientModule::writeWavHeader(File &f, uint32_t numSamples)
 {
     WavHeader h;
@@ -84,12 +124,74 @@ void ApiClientModule::writeWavHeader(File &f, uint32_t numSamples)
     f.write(reinterpret_cast<uint8_t *>(&h), sizeof(WavHeader));
 }
 
+void ApiClientModule::logFlushDuration(size_t bytes, uint32_t elapsedUs)
+{
+    static uint32_t sMaxFlushUs = 0;
+    if (elapsedUs > sMaxFlushUs)
+    {
+        sMaxFlushUs = elapsedUs;
+        Serial.printf("[REC] flush %u bytes took %lu us (new max)\n",
+                      static_cast<unsigned>(bytes), static_cast<unsigned long>(elapsedUs));
+    }
+}
+
+void ApiClientModule::writeBufferBlocking(const int16_t *buf, size_t bytes)
+{
+    if (!m_file || !buf || bytes == 0)
+        return;
+    const uint32_t startUs = micros();
+    m_file.write(reinterpret_cast<const uint8_t *>(buf), bytes);
+    const uint32_t elapsedUs = micros() - startUs;
+    logFlushDuration(bytes, elapsedUs);
+}
+
 void ApiClientModule::flushChunk()
 {
     if (m_bufIdx == 0 || !m_file)
         return;
-    m_file.write(reinterpret_cast<uint8_t *>(m_buf), m_bufIdx * sizeof(int16_t));
+    const size_t bytesToWrite = m_bufIdx * sizeof(int16_t);
+
+    if (m_flushQueue)
+    {
+        int16_t *copy = static_cast<int16_t *>(heap_caps_malloc(bytesToWrite, MALLOC_CAP_8BIT));
+        if (copy)
+        {
+            memcpy(copy, m_buf, bytesToWrite);
+            FlushJob job{copy, bytesToWrite};
+            if (xQueueSend(m_flushQueue, &job, 0) == pdTRUE)
+            {
+                m_flushBytesPending.fetch_add(bytesToWrite, std::memory_order_relaxed);
+                m_bufIdx = 0;
+                return;
+            }
+            heap_caps_free(copy);
+            Serial.println("[REC] flush queue saturated; writing inline");
+        }
+        else
+        {
+            Serial.println("[REC] flush alloc failed; writing inline");
+        }
+    }
+
+    writeBufferBlocking(m_buf, bytesToWrite);
     m_bufIdx = 0;
+}
+
+void ApiClientModule::waitForWriterDrain()
+{
+    if (!m_flushQueue)
+        return;
+
+    const uint32_t start = millis();
+    while (uxQueueMessagesWaiting(m_flushQueue) > 0 || m_flushBytesPending.load(std::memory_order_relaxed) != 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        if ((millis() - start) > 3000)
+        {
+            Serial.println("[REC] Writer still draining after 3s");
+            break;
+        }
+    }
 }
 
 void ApiClientModule::start()
@@ -149,6 +251,8 @@ void ApiClientModule::stop()
     i2s_stop((i2s_port_t)m_i2s_num);
     i2s_zero_dma_buffer((i2s_port_t)m_i2s_num);
 
+    waitForWriterDrain();
+
     // Finalize file
     if (m_file)
     {
@@ -168,6 +272,11 @@ void ApiClientModule::readerTaskThunk(void *arg)
     static_cast<ApiClientModule *>(arg)->readerTask();
 }
 
+void ApiClientModule::writerTaskThunk(void *arg)
+{
+    static_cast<ApiClientModule *>(arg)->writerTask();
+}
+
 void ApiClientModule::readerTask()
 {
     int32_t *i2sBuf = (int32_t *)heap_caps_malloc(sizeof(int32_t) * 1024, MALLOC_CAP_8BIT);
@@ -180,6 +289,22 @@ void ApiClientModule::readerTask()
 
     for (;;)
     {
+        if (m_i2sQueue)
+        {
+            i2s_event_t evt;
+            // while (xQueueReceive(m_i2sQueue, &evt, 0) == pdTRUE)
+            // {
+            //     if (evt.type == I2S_EVENT_RX_Q_OVF)
+            //     {
+            //         Serial.println("[I2S] RX queue overflow while recording");
+            //     }
+            //     else if (evt.type == I2S_EVENT_DMA_ERROR)
+            //     {
+            //         Serial.println("[I2S] DMA error while recording");
+            //     }
+            // }
+        }
+
         if (!m_isRecording)
         {
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -222,6 +347,31 @@ void ApiClientModule::readerTask()
     }
 }
 
+void ApiClientModule::writerTask()
+{
+    if (!m_flushQueue)
+    {
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    FlushJob job{};
+    for (;;)
+    {
+        if (xQueueReceive(m_flushQueue, &job, portMAX_DELAY) != pdTRUE)
+            continue;
+        if (!job.data || job.bytes == 0)
+        {
+            if (job.data)
+                heap_caps_free(job.data);
+            continue;
+        }
+        writeBufferBlocking(job.data, job.bytes);
+        heap_caps_free(job.data);
+        m_flushBytesPending.fetch_sub(job.bytes, std::memory_order_relaxed);
+    }
+}
+
 static inline int16_t to_int16_from_i2s32(int32_t s32)
 {
     // s32 is sign-extended 24-bit audio in the top bits of a 32-bit word.
@@ -259,13 +409,10 @@ bool ApiClientModule::upload()
         stop();
     }
 
-    if (!m_inboxPath)
-    {
-        Serial.println("Upload path not set! Call setInboxPath().");
+    if (!ensureInboxPath("upload"))
         return false;
-    }
 
-    String url = String(API_HOST) + String(m_inboxPath);
+    String url = composeUrl("/message");
     Serial.print("POST ");
     Serial.println(url);
 
@@ -281,13 +428,7 @@ bool ApiClientModule::upload()
     http.addHeader("Content-Type", "audio/wav");
 
     int httpCode = http.sendRequest("POST", &f, f.size());
-    if (httpCode > 0)
-    {
-        Serial.printf("Upload response: %d\n", httpCode);
-        String resp = http.getString();
-        Serial.println(resp);
-    }
-    else
+    if (httpCode <= 0)
     {
         Serial.printf("HTTP POST failed: %s\n", http.errorToString(httpCode).c_str());
         http.end();
@@ -295,50 +436,151 @@ bool ApiClientModule::upload()
         return false;
     }
 
+    Serial.printf("Upload response: %d\n", httpCode);
+    String resp = http.getString();
+    Serial.println(resp);
+    const bool success = httpCode >= 200 && httpCode < 300;
+
     http.end();
     f.close();
-    SPIFFS.remove(m_outPath);
-    return true;
+    if (success)
+        SPIFFS.remove(m_outPath);
+    return success;
 }
 
-bool ApiClientModule::checkInbox()
+bool ApiClientModule::downloadMessage(const char *destPath)
 {
-    String url = String(API_HOST) + String(m_inboxPath);
+    if (!ensureInboxPath("download"))
+        return false;
+    if (!destPath || destPath[0] == '\0')
+    {
+        Serial.println("Download destination path not provided");
+        return false;
+    }
+
+    if (SPIFFS.exists(destPath))
+        SPIFFS.remove(destPath);
+
+    File out = SPIFFS.open(destPath, FILE_WRITE);
+    if (!out)
+    {
+        Serial.println("Failed to open destination file for download");
+        return false;
+    }
+
+    String url = composeUrl("/message");
     Serial.print("GET ");
     Serial.println(url);
 
     HTTPClient http;
     http.begin(url);
-    http.addHeader("Content-Type", "audio/wav");
-
-    int httpCode = http.sendRequest("GET");
-    if (httpCode > 0)
+    const int httpCode = http.sendRequest("GET");
+    if (httpCode <= 0)
     {
-        Serial.printf("Upload response: %d\n", httpCode);
-        String resp = http.getString();
-        // Serial.println(resp);
-
-        JsonDocument doc;
-        deserializeJson(doc, resp);
-        const char *code = doc["code"];
-
-        Serial.println(code);
-
-        if (code == "EMPTY")
-        {
-            http.end();
-            return false;
-        }
-        else
-        {
-            http.end();
-            return true;
-        }
+        Serial.printf("Download request failed: %s\n", http.errorToString(httpCode).c_str());
+        out.close();
+        http.end();
+        SPIFFS.remove(destPath);
+        return false;
     }
-    else
+
+    if (httpCode != 200)
     {
-        Serial.printf("HTTP POST failed: %s\n", http.errorToString(httpCode).c_str());
+        Serial.printf("Download returned HTTP %d\n", httpCode);
+        out.close();
+        http.end();
+        SPIFFS.remove(destPath);
+        return false;
+    }
+
+    const int bytes = http.writeToStream(&out);
+    out.close();
+    http.end();
+
+    if (bytes <= 0)
+    {
+        Serial.println("Download produced no data");
+        SPIFFS.remove(destPath);
+        return false;
+    }
+
+    Serial.printf("Downloaded %d bytes to %s\n", bytes, destPath);
+    return true;
+}
+
+bool ApiClientModule::deleteMessage()
+{
+    if (!ensureInboxPath("delete"))
+        return false;
+
+    String url = composeUrl("/message");
+    Serial.print("DELETE ");
+    Serial.println(url);
+
+    HTTPClient http;
+    http.begin(url);
+    const int httpCode = http.sendRequest("DELETE");
+    if (httpCode <= 0)
+    {
+        Serial.printf("Delete request failed: %s\n", http.errorToString(httpCode).c_str());
         http.end();
         return false;
     }
+
+    if (httpCode != 200)
+    {
+        Serial.printf("Delete returned HTTP %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    String resp = http.getString();
+    http.end();
+    resp.trim();
+    resp.toLowerCase();
+
+    const bool deleted = resp == "true";
+    Serial.printf("Delete response body: %s\n", resp.c_str());
+    return deleted;
+}
+
+bool ApiClientModule::status()
+{
+    if (!ensureInboxPath("status"))
+        return false;
+
+    String url = composeUrl();
+    Serial.print("GET ");
+    Serial.println(url);
+
+    HTTPClient http;
+    http.begin(url);
+    const int httpCode = http.sendRequest("GET");
+    if (httpCode <= 0)
+    {
+        Serial.printf("Status request failed: %s\n", http.errorToString(httpCode).c_str());
+        http.end();
+        return false;
+    }
+
+    if (httpCode != 200)
+    {
+        Serial.printf("Status returned HTTP %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    String resp = http.getString();
+    http.end();
+    resp.trim();
+    resp.toLowerCase();
+
+    const bool exists = resp == "true";
+    Serial.printf("Inbox status: %s\n", exists ? "true" : "false");
+    return exists;
+}
+
+bool ApiClientModule::checkInbox()
+{
+    return status();
 }

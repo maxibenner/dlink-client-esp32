@@ -4,7 +4,7 @@
 // Keep these modest for simplicity/latency
 // #define BUFFER_LENGTH 1024
 #define BUFFER_LENGTH 1024
-#define SAMPLE_RATE 16000
+#define SAMPLE_RATE 8000
 
 static int32_t i2s_buffer[BUFFER_LENGTH]; // raw 32-bit I2S container from INMP441
 
@@ -163,7 +163,7 @@ void AudioRecorderModule::writeWavHeader(fs::File &f, uint32_t sampleRate, uint1
         uint32_t subchunk1Size; // 16 for PCM
         uint16_t audioFormat;   // 1 = PCM
         uint16_t numChannels;   // 1
-        uint32_t sampleRate;    // 16000
+        uint32_t sampleRate;    // 8000
         uint32_t byteRate;      // sampleRate * numChannels * bits/8
         uint16_t blockAlign;    // numChannels * bits/8
         uint16_t bitsPerSample; // 16
